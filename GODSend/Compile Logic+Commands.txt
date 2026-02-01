@@ -1,0 +1,11 @@
+Run setup-vs.ps1 in env
+
+Make sure you have Desktop development with C++ module installed (winget install Microsoft.VisualStudio.2022.BuildTools --force --override "--wait --passive --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.22621")
+
+Should reply: Found Visual Studio at: C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat
+Visual Studio environment loaded successfully!
+You can now use: cl, link, nmake, etc.
+
+Now Run:
+cl /EHsc /std:c++17 /D UNICODE /D _UNICODE /Fe:GODSend.exe godsend_installer.cpp /link winhttp.lib shell32.lib advapi32.lib /SUBSYSTEM:CONSOLE
+Note: /Fe:GODSend.exe is the exe name so you can change this to whatever
