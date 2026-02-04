@@ -7,5 +7,6 @@ Visual Studio environment loaded successfully!
 You can now use: cl, link, nmake, etc.
 
 Now Run:
-cl /EHsc /std:c++17 /D UNICODE /D _UNICODE /Fe:GODSend.exe godsend_installer.cpp /link winhttp.lib shell32.lib advapi32.lib /SUBSYSTEM:CONSOLE
+rc godsend_installer.rc ; cl /EHsc /std:c++17 /D UNICODE /D _UNICODE /Fe:GODSend.exe godsend_installer.cpp godsend_installer.res /link winhttp.lib shell32.lib advapi32.lib user32.lib /SUBSYSTEM:CONSOLE
+
 Note: /Fe:GODSend.exe is the exe name so you can change this to whatever

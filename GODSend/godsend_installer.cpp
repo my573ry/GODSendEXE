@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <shlobj.h>
+#include <winuser.h>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -12,6 +13,8 @@
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "user32.lib")
 
 namespace fs = std::filesystem;
 
@@ -235,6 +238,77 @@ bool TestGitInstalled() {
     return ExecuteCommand(L"git --version") == 0;
 }
 
+std::wstring FindGitDirectory() {
+    std::vector<std::wstring> searchPaths = {
+        L"C:\\Program Files\\Git\\cmd",
+        L"C:\\Program Files\\Git\\bin",
+        L"C:\\Program Files (x86)\\Git\\cmd",
+        L"C:\\Program Files (x86)\\Git\\bin"
+    };
+    
+    wchar_t* username = _wgetenv(L"USERNAME");
+    if (username) {
+        searchPaths.push_back(L"C:\\Users\\" + std::wstring(username) + L"\\AppData\\Local\\Programs\\Git\\cmd");
+    }
+    
+    for (const auto& path : searchPaths) {
+        fs::path gitExe = fs::path(path) / L"git.exe";
+        if (fs::exists(gitExe)) {
+            return path;
+        }
+    }
+    
+    return L"";
+}
+
+bool UpdateSystemPathAndReload(const std::wstring& gitDir) {
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+        L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
+        0, KEY_READ | KEY_SET_VALUE, &hKey) != ERROR_SUCCESS) {
+        return false;
+    }
+    
+    wchar_t currentPath[32767];
+    DWORD pathSize = sizeof(currentPath);
+    DWORD type;
+    
+    if (RegQueryValueExW(hKey, L"Path", NULL, &type, (LPBYTE)currentPath, &pathSize) != ERROR_SUCCESS) {
+        RegCloseKey(hKey);
+        return false;
+    }
+    
+    std::wstring pathStr(currentPath);
+    
+    // Check if already in PATH
+    if (pathStr.find(gitDir) != std::wstring::npos) {
+        RegCloseKey(hKey);
+        // Still need to update current process
+        SetEnvironmentVariableW(L"PATH", pathStr.c_str());
+        return true;
+    }
+    
+    // Add to PATH
+    std::wstring newPath = pathStr + L";" + gitDir;
+    
+    if (RegSetValueExW(hKey, L"Path", 0, REG_EXPAND_SZ,
+        (BYTE*)newPath.c_str(), (newPath.length() + 1) * sizeof(wchar_t)) != ERROR_SUCCESS) {
+        RegCloseKey(hKey);
+        return false;
+    }
+    
+    RegCloseKey(hKey);
+    
+    // Broadcast environment change
+    SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0,
+        reinterpret_cast<LPARAM>(L"Environment"), SMTO_ABORTIFHUNG, 5000, nullptr);
+    
+    // Update current process PATH
+    SetEnvironmentVariableW(L"PATH", newPath.c_str());
+    
+    return true;
+}
+
 // ==========================================
 // Main Installation Logic
 // ==========================================
@@ -242,16 +316,18 @@ int wmain(int argc, wchar_t* argv[]) {
     SetConsoleOutputCP(CP_UTF8);
     
     bool forceClean = false;
-    if (argc > 1 && std::wstring(argv[1]) == L"-ForceClean") {
-        forceClean = true;
+    
+    for (int i = 1; i < argc; i++) {
+        if (std::wstring(argv[i]) == L"-ForceClean") {
+            forceClean = true;
+        }
     }
 
-    // Check admin privileges
     if (!IsRunningAsAdmin()) {
         WriteWarn(L"This installer requires Administrator privileges.");
         WriteInfo(L"Requesting elevation...");
         if (ElevateProcess()) {
-            return 0; // Parent process exits, elevated continues
+            return 0;
         } else {
             WriteFail(L"Failed to elevate privileges.");
             std::wcout << L"Press any key to exit..." << std::endl;
@@ -273,18 +349,92 @@ int wmain(int argc, wchar_t* argv[]) {
     ResetConsoleColor();
     std::wcout << std::endl;
 
-    // Check Git installation
+    // ==========================================
+    // GIT INSTALLATION CHECK & AUTO-INSTALL
+    // ==========================================
+    
     if (!TestGitInstalled()) {
         WriteFail(L"Git is not installed or not in PATH.");
         std::wcout << std::endl;
-        WriteWarn(L"Please install Git from: https://git-scm.com/download/win");
-        WriteWarn(L"Or install via winget: winget install Git.Git");
-        std::wcout << std::endl << L"Press any key to exit..." << std::endl;
-        _getwch();
-        return 1;
+        
+        WriteInfo(L"Checking for Windows Package Manager (winget)...");
+        int wingetResult = ExecuteCommand(L"winget --version");
+        
+        if (wingetResult == 0) {
+            WriteOk(L"Winget is available. Installing Git automatically...");
+            std::wcout << std::endl;
+            
+            WriteInfo(L"This may take 1-2 minutes. Please wait...");
+            std::wstring wingetCmd = L"winget install --id Git.Git --source winget "
+                L"--accept-package-agreements --accept-source-agreements --silent";
+            
+            int installResult = ExecuteCommand(wingetCmd);
+            
+            if (installResult == 0 || installResult == -1978335189 || installResult == static_cast<int>(0x8A15002B)) {
+                WriteOk(L"Git installation completed.");
+                std::wcout << std::endl;
+                
+                WriteInfo(L"Locating Git installation...");
+                Sleep(3000); // Wait for files to be written
+                
+                std::wstring gitDir = FindGitDirectory();
+                
+                if (!gitDir.empty()) {
+                    WriteOk(L"Found Git at: " + gitDir);
+                    WriteInfo(L"Adding Git to system PATH...");
+                    
+                    if (UpdateSystemPathAndReload(gitDir)) {
+                        WriteOk(L"PATH updated successfully.");
+                        std::wcout << std::endl;
+                        
+                        WriteInfo(L"Verifying Git is accessible...");
+                        Sleep(1000);
+                        
+                        if (TestGitInstalled()) {
+                            WriteOk(L"Git is now working via PATH! Continuing installation...");
+                            std::wcout << std::endl;
+                        } else {
+                            WriteWarn(L"Git PATH updated but not yet active in this session.");
+                            WriteWarn(L"This is a Windows limitation. Please close and rerun this installer.");
+                            std::wcout << std::endl << L"Press any key to exit..." << std::endl;
+                            _getwch();
+                            return 0;
+                        }
+                    } else {
+                        WriteFail(L"Failed to update system PATH.");
+                        WriteWarn(L"Please add Git to PATH manually and rerun installer.");
+                        std::wcout << std::endl << L"Press any key to exit..." << std::endl;
+                        _getwch();
+                        return 1;
+                    }
+                } else {
+                    WriteFail(L"Git installed but could not locate installation directory.");
+                    WriteWarn(L"Please reboot and run this installer again.");
+                    std::wcout << std::endl << L"Press any key to exit..." << std::endl;
+                    _getwch();
+                    return 1;
+                }
+            } else {
+                WriteFail(L"Failed to install Git (exit code: " + std::to_wstring(installResult) + L")");
+                WriteWarn(L"Please install Git manually: https://git-scm.com/download/win");
+                std::wcout << std::endl << L"Press any key to exit..." << std::endl;
+                _getwch();
+                return 1;
+            }
+        } else {
+            WriteFail(L"Windows Package Manager (winget) is not available.");
+            std::wcout << std::endl;
+            WriteWarn(L"To enable automatic Git installation:");
+            WriteWarn(L"  1. Install 'App Installer' from Microsoft Store (includes winget)");
+            WriteWarn(L"  OR");
+            WriteWarn(L"  2. Install Git manually from: https://git-scm.com/download/win");
+            std::wcout << std::endl << L"Press any key to exit..." << std::endl;
+            _getwch();
+            return 1;
+        }
+    } else {
+        WriteOk(L"Git is installed and ready.");
     }
-
-    WriteOk(L"Git is installed.");
 
     // Determine installation directory
     wchar_t exePath[MAX_PATH];
@@ -294,7 +444,6 @@ int wmain(int argc, wchar_t* argv[]) {
 
     WriteInfo(L"Installation directory: " + installDir.wstring());
 
-    // ForceClean
     if (forceClean && fs::exists(installDir)) {
         WriteWarn(L"ForceClean enabled: removing existing installation...");
         try {
@@ -308,7 +457,6 @@ int wmain(int argc, wchar_t* argv[]) {
         }
     }
 
-    // Create directory structure
     fs::path readyDir = installDir / L"Ready";
     fs::path tempDir = installDir / L"Temp";
     fs::path xboxDir = installDir / L"MOVE_THESE_FILES_TO_XBOX";
@@ -527,7 +675,6 @@ int wmain(int argc, wchar_t* argv[]) {
     ResetConsoleColor();
     std::wcout << std::endl;
 
-    // Check installed components
     SetConsoleColor(Color::Cyan);
     std::wcout << L"Installed Components:" << std::endl;
     ResetConsoleColor();
@@ -552,7 +699,6 @@ int wmain(int argc, wchar_t* argv[]) {
         ResetConsoleColor();
     }
 
-    // Next Steps
     std::wcout << std::endl;
     SetConsoleColor(Color::Cyan);
     std::wcout << L"========================================" << std::endl;
@@ -594,3 +740,5 @@ int wmain(int argc, wchar_t* argv[]) {
 
     return 0;
 }
+
+//Credits to Nesquin and the team for this software
